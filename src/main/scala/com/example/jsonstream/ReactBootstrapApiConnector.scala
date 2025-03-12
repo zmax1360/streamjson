@@ -1,12 +1,17 @@
+import com.example.jsonstream.{MessageEnvelop, SurfaceMessage}
 import com.fasterxml.jackson.core.{JsonFactory, JsonParseException, JsonParser, JsonToken}
 import com.fasterxml.jackson.databind.JsonNode
 import io.reactivex.rxjava3.core.Observable
 import io.vertx.core.json.JsonObject
 import org.slf4j.LoggerFactory
+
 import scala.collection.mutable.ListBuffer
 import scala.util.{Failure, Success, Try}
 import io.vertx.core.Vertx
 import io.vertx.core.buffer.Buffer
+import io.vertx.scala.core.JsonObject
+import rx.Observable
+
 import java.nio.CharBuffer
 
 class ReactBootstrapApiConnector(host: String, port: Int, prefix: String, isSSL: Boolean, vertx: Vertx, surfaceMessageAdapter: SurfaceMessageAdapter) {
@@ -17,20 +22,44 @@ class ReactBootstrapApiConnector(host: String, port: Int, prefix: String, isSSL:
   private val REACT_BOOTSTRAP_API_RESPONSE_COMPLETED = "REACT_BOOTSTRAP_API_RESPONSE_COMPLETED"
   private val APPEND_JSON_START = "{\"surfaceResult\":{"
   private val APPEND_JSON_END = "}"
+  private val splitOn = "},\\{\\"surfaceResult\":\\{"
   private val REACT_REST_API_EXCEPTION = "REACT_REST_API_EXCEPTION"
 
   def bootstrapReactApi: Observable[MessageEnvelop[SurfaceMessage]] = {
     streamRatesFromReact
-      .flatMapIterable(chunk => {
-        apiJsonStreamParser.processChunk(Buffer.buffer(chunk)) // Process the chunk
-        val completeObjects = getAndClearProcessedObjects()    // Get processed objects
-        completeObjects.map(obj => convertToMessageEnvelop(obj))
-      })
+      .scan(("", Array.empty[String])) { case ((builder, _), next) =>
+        val newBuilder = new StringBuilder(builder)
+        val res =
+          if (next == REACT_REST_API_EXCEPTION) Array(REACT_REST_API_EXCEPTION)
+          else if (next == REACT_BOOTSTRAP_API_RESPONSE_COMPLETED)
+            newBuilder.substring(startIndex, newBuilder.length - 2).split(splitOn)
+          else {
+            newBuilder.append(next)
+            Array.empty[String]
+          }
+        (newBuilder.toString, res)
+      }
+      .map(_._2)
+      .filter(_.nonEmpty)
+      .flatMapIterable(identity)
       .observeOn(creditRiskWorkerSchedulerFactory.reactEndpointTableLoaderScheduler)
-      .onErrorReturn(e => {
-        logger.error("Error processing React API stream", e)
-        new MessageEnvelop[SurfaceMessage](false, None, None, Some("Error processing data"))
-      })
+      .map { ss =>
+        if (ss == REACT_REST_API_EXCEPTION)
+          (CreditRiskJobDetails.ERROR.toString, ss)
+        else
+          (CreditRiskJobDetails.COMPLETED.toString, ss.mkString(APPEND_JSON_START, "", APPEND_JSON_END))
+      }
+      .observeOn(creditRiskWorkerSchedulerFactory.reactEndpointTableLoaderScheduler)
+      .map { case (status, jsonData) =>
+        if (jsonData.contains(REACT_REST_API_EXCEPTION)) {
+          new MessageEnvelop[SurfaceMessage](false, None, None, Some(status))
+        } else {
+          Try {
+            val jsonObj = new JsonObject(jsonData)
+            new MessageEnvelop[SurfaceMessage](true, Some(jsonObj), None, Some(status))
+          }.getOrElse(new MessageEnvelop[SurfaceMessage](false, None, None, Some(status)))
+        }
+      }
   }
 
   // This method will be called by ApiJsonStreamParser for each complete JsonNode
