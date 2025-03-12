@@ -8,6 +8,10 @@ import scala.util.{Failure, Success, Try}
 import org.json.JSONObject
 import com.fasterxml.jackson.core.{JsonParser, JsonToken}
 import com.fasterxml.jackson.databind.ObjectMapper
+import rx.lang.scala.{Observable, Scheduler}
+import rx.lang.scala.schedulers.ExecutionContextScheduler
+import scala.concurrent.ExecutionContext
+import com.google.common.util.concurrent.ThreadFactoryBuilder
 
 class ReactBootstrapApiConnector(
                                   host: String,
@@ -25,76 +29,97 @@ class ReactBootstrapApiConnector(
   private val objectMapper = new ObjectMapper()
   private var buffer = new StringBuilder()
 
-  def streamRatesFromReact(): Unit = {
-    client.request().onComplete { reqAr =>
-      if (reqAr.succeeded()) {
-        val request = reqAr.result()
-        request.send().onComplete { respAr =>
-          if (respAr.succeeded()) {
-            val response = respAr.result()
-            if (response.statusCode() == 200) {
-              response.handler { b =>
-                executorService.execute(() => processChunk(b.toString))
-              }.exceptionHandler { e =>
-                logger.error("Error in response", e)
-              }.endHandler { _ =>
-                finalizeProcessing()
+  lazy val reactEndpointTableLoaderScheduler: Scheduler = {
+    val threadFactory = new ThreadFactoryBuilder().setNameFormat("react").build()
+    val executionContext = ExecutionContext.fromExecutor(
+      Executors.newFixedThreadPool(1, threadFactory)
+    )
+    ExecutionContextScheduler(executionContext)
+  }
+
+  def streamRatesFromReact(): Observable[String] = {
+    Observable.create { subscriber =>
+      client.request().onComplete { reqAr =>
+        if (reqAr.succeeded()) {
+          val request = reqAr.result()
+          request.send().onComplete { respAr =>
+            if (respAr.succeeded()) {
+              val response = respAr.result()
+              if (response.statusCode() == 200) {
+                response.handler { b =>
+                  executorService.execute(() => processChunk(b.toString()))
+                }.exceptionHandler { e =>
+                  subscriber.onError(e)
+                }.endHandler { _ =>
+                  subscriber.onCompleted()
+                }
+              } else {
+                subscriber.onError(new RuntimeException(response.statusMessage()))
               }
             } else {
-              logger.error("HTTP error: " + response.statusMessage())
+              subscriber.onError(respAr.cause())
             }
-          } else logger.error("Request failed", respAr.cause())
+          }
+        } else {
+          subscriber.onError(reqAr.cause())
         }
-      } else logger.error("Request creation failed", reqAr.cause())
+      }
     }
+  }
+
+  def bootstrapReactApi: Observable[MessageEnvelop[SurfaceMessage]] = {
+    streamRatesFromReact
+      .flatMapIterable(chunk => {
+        processChunk(chunk)
+        val (completeObjects, remainingBuffer) = parseBuffer()
+        buffer.clear()
+        buffer.appendAll(remainingBuffer)
+        completeObjects.map(obj => convertToMessageEnvelop(obj))
+      })
+      .onErrorReturn(e => {
+        logger.error("Error processing React API stream", e)
+        new MessageEnvelop[SurfaceMessage](false, None, None, Some("Error processing data"))
+      })
   }
 
   private def processChunk(chunk: String): Unit = {
     buffer.append(chunk) // Append new data to the buffer
-    parseBuffer() // Try extracting complete JSON objects
   }
 
-  private def parseBuffer(): Unit = {
-    val parser: JsonParser = objectMapper.createParser(buffer.toString())
+  private def parseBuffer(): (Array[String], String) = {
     val extractedObjects = scala.collection.mutable.ListBuffer[String]()
+    val parser = objectMapper.createParser(buffer.toString())
     var lastProcessedIndex = 0
 
     try {
-      if (parser.nextToken() == JsonToken.START_ARRAY) {
-        lastProcessedIndex = parser.getCurrentLocation.getCharOffset.toInt
-        while (parser.nextToken() == JsonToken.START_OBJECT) {
-          val objectStart = parser.getCurrentLocation.getCharOffset.toInt
-          parser.skipChildren() // Move to the end of the object
-          val objectEnd = parser.getCurrentLocation.getCharOffset.toInt
+      while (parser.nextToken() == JsonToken.START_OBJECT) {
+        val objectStart = parser.getCurrentLocation.getCharOffset.toInt
+        parser.skipChildren()
+        val objectEnd = parser.getCurrentLocation.getCharOffset.toInt
 
-          // Extract JSON substring from buffer
-          val jsonString = buffer.substring(objectStart, objectEnd + 1)
-          extractedObjects.append(jsonString)
-          lastProcessedIndex = objectEnd + 1
-        }
+        val jsonString = buffer.substring(objectStart, objectEnd + 1)
+        extractedObjects.append(jsonString)
+        lastProcessedIndex = objectEnd + 1
       }
     } catch {
-      case _: Exception => // Incomplete object, keep buffer as is
+      case _: Exception =>
     }
-
-    // Emit all complete objects
-    extractedObjects.foreach(obj => processObject(obj))
-
-    // Retain only unprocessed portion in buffer
-    if (lastProcessedIndex > 0 && lastProcessedIndex < buffer.length) {
-      buffer = new StringBuilder(buffer.substring(lastProcessedIndex))
-    }
+    val remainingBuffer = if (lastProcessedIndex > 0 && lastProcessedIndex < buffer.length) {
+      buffer.substring(lastProcessedIndex)
+    } else ""
+    (extractedObjects.toArray, remainingBuffer)
   }
 
-  private def processObject(json: String): Unit = {
+  private def convertToMessageEnvelop(json: String): MessageEnvelop[SurfaceMessage] = {
     Try {
       val jsonObject = new JSONObject(json)
       val adapted = surfaceMessageAdapter.adapt(Array(jsonObject))
-      val messageEnvelope = new MessageEnvelop[SurfaceMessage](true, Some(adapted), None, Some("Success"))
-      logger.info("Processed Message: " + messageEnvelope)
+      new MessageEnvelop[SurfaceMessage](true, Some(adapted), None, Some("Success"))
     } match {
-      case Success(_) =>
-      case Failure(e) => logger.error("Failed to process object", e)
+      case Success(messageEnvelope) => messageEnvelope
+      case Failure(e) =>
+        logger.error("Failed to process object", e)
+        new MessageEnvelop[SurfaceMessage](false, None, None, Some("Parsing Error"))
     }
   }
 
