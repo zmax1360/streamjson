@@ -72,8 +72,7 @@ class ReactBootstrapApiConnector(
       .flatMapIterable(chunk => {
         processChunk(chunk)
         val (completeObjects, remainingBuffer) = parseBuffer()
-        buffer.clear()
-        buffer.appendAll(remainingBuffer)
+
         completeObjects.map(obj => convertToMessageEnvelop(obj))
       })
       .onErrorReturn(e => {
@@ -87,6 +86,31 @@ class ReactBootstrapApiConnector(
   }
 
   private def parseBuffer(): (Array[String], String) = {
+    val extractedObjects = scala.collection.mutable.ListBuffer[String]()
+    val parser = objectMapper.createParser(buffer.toString())
+    var lastProcessedIndex = 0
+
+    try {
+      while (parser.nextToken() != null) {
+        if (parser.getCurrentToken == JsonToken.START_OBJECT) {
+          val objectStart = parser.getCurrentLocation.getCharOffset.toInt
+          parser.skipChildren()
+          val objectEnd = parser.getCurrentLocation.getCharOffset.toInt
+
+          val jsonString = buffer.substring(objectStart, objectEnd + 1)
+          extractedObjects.append(jsonString)
+          lastProcessedIndex = objectEnd + 1
+        }
+      }
+    } catch {
+      case e: Exception =>
+        logger.warn("Parsing incomplete, waiting for next chunk", e)
+    }
+    val remainingBuffer = if (lastProcessedIndex > 0 && lastProcessedIndex < buffer.length) {
+      buffer.substring(lastProcessedIndex)
+    } else ""
+    (extractedObjects.toArray, remainingBuffer)
+  } = {
     val extractedObjects = scala.collection.mutable.ListBuffer[String]()
     val parser = objectMapper.createParser(buffer.toString())
     var lastProcessedIndex = 0
