@@ -45,67 +45,73 @@ def bootstrapReactApi: Observable[MessageEnvelop[SurfaceMessage]] = {
 import java.util.concurrent.CompletableFuture
 import java.util.function.Consumer
 import org.json.JSONObject
-import scala.util.Try
-import scala.util.Success
+import scala.util.{Try, Success, Failure}
 
-
-object JsonProcessingState extends Enumeration {
-  type JsonProcessingState = Value
-  val IDLE, IN_JSON, ERROR = Value
+object JsonChunkProcessor {
+  sealed trait JsonProcessingState
+  case object IDLE extends JsonProcessingState
+  case object IN_JSON extends JsonProcessingState
+  case object ERROR extends JsonProcessingState
 }
 
-class JsonChunkProcessor(private var messageConsumer: Consumer[MessageEnvelop[String]], private var adapter: SurfaceMessageAdapter) {
-  private var state = JsonProcessingState.IDLE
-  private val currentJsonObject = new lang.StringBuilder
-  final private val APPEND_JSON_START = "{\"surfaceResult\":{"
-  final private val APPEND_JSON_END = "}"
-  final private val REACT_REST_API_EXCEPTION = "REACT_REST_API_EXCEPTION"
-  final private val COMPLETED_MESSAGE_TYPE = "CreditRiskJobDetails.COMPLETED"
+class JsonChunkProcessor(messageConsumer: Consumer[MessageEnvelop[String]], adapter: SurfaceMessageAdapter) {
+  import JsonChunkProcessor._
 
-  def processChunk(chunk: String): CompletableFuture[Void] = CompletableFuture.runAsync(() => {
-    def foo() = {
+  private var state: JsonProcessingState = IDLE
+  private val currentJsonObject = new StringBuilder()
+
+  private val APPEND_JSON_START = "{\"surfaceResult\":{"
+  private val APPEND_JSON_END = "}"
+  private val REACT_REST_API_EXCEPTION = "REACT_REST_API_EXCEPTION"
+  private val COMPLETED_MESSAGE_TYPE = "CreditRiskJobDetails.COMPLETED"
+
+  def processChunk(chunk: String): CompletableFuture[Void] = {
+    CompletableFuture.runAsync(() => {
       if (chunk == REACT_REST_API_EXCEPTION) {
-        state = JsonProcessingState.ERROR
-        messageConsumer.accept(new MessageEnvelop[String](false, null, null, "Error"))
+        state = ERROR
+        messageConsumer.accept(MessageEnvelop(false, null, null, "Error"))
         return
       }
-      val builder = new lang.StringBuilder(chunk)
+
+      val builder = new StringBuilder(chunk)
       var index = 0
-      while (index < builder.length) if (builder.substring(index).startsWith(APPEND_JSON_START)) {
-        state = JsonProcessingState.IN_JSON
-        currentJsonObject.append(APPEND_JSON_START)
-        index += APPEND_JSON_START.length
-      }
-      else if ((state eq JsonProcessingState.IN_JSON) && builder.substring(index).startsWith(APPEND_JSON_END)) {
-        currentJsonObject.append(APPEND_JSON_END)
-        state = JsonProcessingState.IDLE
-        val jsonString = currentJsonObject.toString
-        currentJsonObject.setLength(0) // Clear
 
-        val tryResult = Try.apply(() => {
-          val jsonObject = new JSONObject(jsonString)
-          val adapted = adapter.adapt(Array[JSONObject](jsonObject))(0).toString
-          new MessageEnvelop[String](true, adapted, null, COMPLETED_MESSAGE_TYPE)
+      while (index < builder.length()) {
+        if (builder.substring(index).startsWith(APPEND_JSON_START)) {
+          state = IN_JSON
+          currentJsonObject.append(APPEND_JSON_START)
+          index += APPEND_JSON_START.length
+        } else if (state == IN_JSON && builder.substring(index).startsWith(APPEND_JSON_END)) {
+          currentJsonObject.append(APPEND_JSON_END)
+          state = IDLE
+          val jsonString = currentJsonObject.toString()
+          currentJsonObject.setLength(0) // Clear
 
-        })
-        if (tryResult.isSuccess) messageConsumer.accept(tryResult.get)
-        else messageConsumer.accept(new MessageEnvelop[String](false, null, null, COMPLETED_MESSAGE_TYPE))
-        index += APPEND_JSON_END.length
-      }
-      else if (state eq JsonProcessingState.IN_JSON) {
-        currentJsonObject.append(builder.charAt(index))
-        index += 1
-      }
-      else index += 1
-    }
+          Try {
+            val jsonObject = new JSONObject(jsonString)
+            val adapted = adapter.adapt(Array(jsonObject))(0).toString
+            MessageEnvelop(true, adapted, null, COMPLETED_MESSAGE_TYPE)
+          } match {
+            case Success(result) => messageConsumer.accept(result)
+            case Failure(_) => messageConsumer.accept(MessageEnvelop(false, null, null, COMPLETED_MESSAGE_TYPE))
+          }
 
-    foo()
-  })
+          index += APPEND_JSON_END.length
+        } else if (state == IN_JSON) {
+          currentJsonObject.append(builder.charAt(index))
+          index += 1
+        } else {
+          index += 1
+        }
+      }
+    })
+  }
 }
 
-class MessageEnvelop[T](var success: Boolean, var data: T, var error: AnyRef, var messageType: String) {
-}
+case class MessageEnvelop[T](success: Boolean, data: T, error: Any, messageType: String)
 
 class SurfaceMessageAdapter {
-  def adapt(input: Array[JSONObject]): Array[JSONObject] = input
+  def adapt(input: Array[JSONObject]): Array[JSONObject] = {
+    input
+  }
 }
