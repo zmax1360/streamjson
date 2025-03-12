@@ -1,0 +1,27 @@
+plugins {
+    id 'scala'
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.scala-lang:scala-library:2.13.10'
+    implementation 'io.vertx:vertx-core:4.4.4'
+    implementation 'io.vertx:vertx-lang-scala_2.13:4.4.4'
+    implementation 'io.vertx:vertx-web-client:4.4.4'
+    implementation 'com.fasterxml.jackson.core:jackson-core:2.15.2'
+    implementation 'com.fasterxml.jackson.module:jackson-module-scala_2.13:2.15.2'
+    
+    testImplementation 'org.scalatest:scalatest_2.13:3.2.15'
+    testImplementation 'junit:junit:4.13.2'
+}
+
+application {
+    mainClass = 'com.example.jsonstream.ApiJsonStreamProcessor'
+}
+
+sourceCompatibility = '11'
+targetCompatibility = '11' 
