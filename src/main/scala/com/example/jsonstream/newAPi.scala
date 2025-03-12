@@ -1,117 +1,83 @@
-import rx.lang.scala.Observable
-import rx.lang.scala.Subscriber
+import com.example.jsonstream.{MessageEnvelop, SurfaceMessage, SurfaceMessageAdapter}
+import com.fasterxml.jackson.core.JsonFactory
+import io.vertx.core.Vertx
+import io.vertx.core.http.HttpClient
+import org.slf4j.LoggerFactory
+import java.util.concurrent.{CompletableFuture, Executors}
+import scala.util.{Failure, Success, Try}
 import org.json.JSONObject
-import scala.util.{Success, Try}
-import java.util.function.Consumer
-import java.util.concurrent.CompletableFuture
 
-// Assuming you have your SurfaceMessageAdapter and MessageEnvelop classes defined
-// Assuming you have your streamRatesFromReact Observable defined
-
-def bootstrapReactApi: Observable[MessageEnvelop[SurfaceMessage]] = {
-  Observable.create { subscriber =>
-    val adapter = new SurfaceMessageAdapter() // Instantiate your adapter
-    val consumer: Consumer[MessageEnvelop[String]] = message => {
-      // Adapt the String MessageEnvelop to a SurfaceMessage MessageEnvelop
-      if (message.success) {
-        Try(adapter.adapt(Array(new JSONObject(message.data))).map(m => new MessageEnvelop[SurfaceMessage](true, Some(m), None, Some(message.messageType), None, None, None)).get) match {
-          case Success(messageEnvelop) => subscriber.onNext(messageEnvelop)
-          case _ => subscriber.onNext(new MessageEnvelop[SurfaceMessage](false, None, None, Some(message.messageType)))
-        }
-      } else {
-        subscriber.onNext(new MessageEnvelop[SurfaceMessage](false, None, None, Some(message.messageType)))
-      }
-    }
-
-    val processor = new JsonChunkProcessor(consumer, adapter)
-
-    streamRatesFromReact.subscribe(new Subscriber[String] {
-      override def onNext(chunk: String): Unit = {
-        processor.processChunk(chunk).join() // Process each chunk
-        if(chunk == "REACT_BOOTSTRAP_API_RESPONSE_COMPLETED"){
-          subscriber.onCompleted()
-        }
-      }
-
-      override def onError(e: Throwable): Unit = {
-        subscriber.onError(e)
-      }
-
-      override def onCompleted(): Unit = {}
-    })
-  }
-}
-
-import java.util.concurrent.CompletableFuture
-import java.util.function.Consumer
-import org.json.JSONObject
-import scala.util.{Try, Success, Failure}
-
-object JsonChunkProcessor {
-  sealed trait JsonProcessingState
-  case object IDLE extends JsonProcessingState
-  case object IN_JSON extends JsonProcessingState
-  case object ERROR extends JsonProcessingState
-}
-
-class JsonChunkProcessor(messageConsumer: Consumer[MessageEnvelop[String]], adapter: SurfaceMessageAdapter) {
-  import JsonChunkProcessor._
-
-  private var state: JsonProcessingState = IDLE
-  private val currentJsonObject = new StringBuilder()
+class ReactBootstrapApiConnector(
+                                  host: String,
+                                  port: Int,
+                                  prefix: String,
+                                  isSSL: Boolean,
+                                  vertx: Vertx,
+                                  surfaceMessageAdapter: SurfaceMessageAdapter
+                                ) {
+  private val logger = LoggerFactory.getLogger(getClass)
+  private val jsonFactory = new JsonFactory()
+  private val client: HttpClient = vertx.createHttpClient()
+  private val executorService = Executors.newSingleThreadExecutor()
 
   private val APPEND_JSON_START = "{\"surfaceResult\":{"
   private val APPEND_JSON_END = "}"
+  private val splitOn = "},\\{\"surfaceResult\":\\{"
+  private val REACT_BOOTSTRAP_API_RESPONSE_COMPLETED = "REACT_BOOTSTRAP_API_RESPONSE_COMPLETED"
   private val REACT_REST_API_EXCEPTION = "REACT_REST_API_EXCEPTION"
-  private val COMPLETED_MESSAGE_TYPE = "CreditRiskJobDetails.COMPLETED"
 
-  def processChunk(chunk: String): CompletableFuture[Void] = {
-    CompletableFuture.runAsync(() => {
-      if (chunk == REACT_REST_API_EXCEPTION) {
-        state = ERROR
-        messageConsumer.accept(MessageEnvelop(false, null, null, "Error"))
-        return
-      }
+  private var buffer = new StringBuilder()
 
-      val builder = new StringBuilder(chunk)
-      var index = 0
+  def streamRatesFromReact(): CompletableFuture[List[String]] = {
+    val promise = new CompletableFuture[List[String]]()
 
-      while (index < builder.length()) {
-        if (builder.substring(index).startsWith(APPEND_JSON_START)) {
-          state = IN_JSON
-          currentJsonObject.append(APPEND_JSON_START)
-          index += APPEND_JSON_START.length
-        } else if (state == IN_JSON && builder.substring(index).startsWith(APPEND_JSON_END)) {
-          currentJsonObject.append(APPEND_JSON_END)
-          state = IDLE
-          val jsonString = currentJsonObject.toString()
-          currentJsonObject.setLength(0) // Clear
+    client.request().onComplete { reqAr =>
+      if (reqAr.succeeded()) {
+        val request = reqAr.result()
+        request.send().onComplete { respAr =>
+          if (respAr.succeeded()) {
+            val response = respAr.result()
+            if (response.statusCode() == 200) {
+              response.handler { b =>
+                executorService.execute(() => buffer.append(b.toString))
+              }.exceptionHandler { e =>
+                logger.error("Error in response", e)
+                promise.completeExceptionally(e)
+              }.endHandler { _ =>
+                val completedResponse = buffer.toString()
+                val messages =
+                  if (completedResponse.contains(REACT_BOOTSTRAP_API_RESPONSE_COMPLETED))
+                    completedResponse.split(splitOn).toList
+                  else List.empty
+                promise.complete(messages)
+              }
+            } else {
+              promise.completeExceptionally(new RuntimeException(response.statusMessage()))
+            }
+          } else promise.completeExceptionally(respAr.cause())
+        }
+      } else promise.completeExceptionally(reqAr.cause())
+    }
 
-          Try {
-            val jsonObject = new JSONObject(jsonString)
-            val adapted = adapter.adapt(Array(jsonObject))(0).toString
-            MessageEnvelop(true, adapted, null, COMPLETED_MESSAGE_TYPE)
-          } match {
-            case Success(result) => messageConsumer.accept(result)
-            case Failure(_) => messageConsumer.accept(MessageEnvelop(false, null, null, COMPLETED_MESSAGE_TYPE))
-          }
+    promise
+  }
 
-          index += APPEND_JSON_END.length
-        } else if (state == IN_JSON) {
-          currentJsonObject.append(builder.charAt(index))
-          index += 1
+  def bootstrapReactApi(): CompletableFuture[List[MessageEnvelop[SurfaceMessage]]] = {
+    streamRatesFromReact().thenApply(messages => {
+      messages.map { msg =>
+        if (msg.contains(REACT_REST_API_EXCEPTION)) {
+          new MessageEnvelop[SurfaceMessage](false, None, None, Some("Error"))
         } else {
-          index += 1
+          Try {
+            val json = new JSONObject(APPEND_JSON_START + msg + APPEND_JSON_END)
+            val adapted = surfaceMessageAdapter.adapt(Array(json))
+            new MessageEnvelop[SurfaceMessage](true, Some(adapted), None, Some("Success"))
+          } match {
+            case Success(envelop) => envelop
+            case Failure(_) => new MessageEnvelop[SurfaceMessage](false, None, None, Some("Parsing Error"))
+          }
         }
       }
     })
-  }
-}
-
-case class MessageEnvelop[T](success: Boolean, data: T, error: Any, messageType: String)
-
-class SurfaceMessageAdapter {
-  def adapt(input: Array[JSONObject]): Array[JSONObject] = {
-    input
   }
 }
