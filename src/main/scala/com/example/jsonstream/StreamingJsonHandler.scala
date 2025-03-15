@@ -20,16 +20,27 @@ class ReactBootstrapApiConnector(
   private val client: HttpClient = vertx.createHttpClient()
   private val REACT_REST_API_EXCEPTION = "REACT_REST_API_EXCEPTION"
 
-  trait StreamJsonHandler {
+  /**
+   * Streaming JSON Handler Interface
+   * Defines how to handle different JSON parsing events.
+   */
+  trait StreamingJsonHandler {
+    def begin(): Unit
     def handle(event: JsonEvent): Unit
     def handleError(e: Throwable): Unit
     def end(): Unit
   }
 
-  class MyStreamJsonHandler(subscriber: Subscriber[JsonObject]) extends StreamJsonHandler {
+  /**
+   * JSON Streaming Handler Implementation
+   * Handles JSON objects and emits them to the subscriber.
+   */
+  class MyStreamJsonHandler(subscriber: Subscriber[JsonObject]) extends StreamingJsonHandler {
     private var currentObject: JsonObject = _
     private var currentFieldName: String = _
     private var insideArray = false
+
+    override def begin(): Unit = logger.debug("JSON Streaming started")
 
     override def handle(event: JsonEvent): Unit = {
       event.eventType() match {
@@ -60,7 +71,7 @@ class ReactBootstrapApiConnector(
 
         case JsonEventType.END_OBJECT =>
           if (insideArray) {
-            subscriber.onNext(currentObject)
+            subscriber.onNext(currentObject) // Emit each object inside the array
           }
           currentObject = null
 
@@ -78,26 +89,56 @@ class ReactBootstrapApiConnector(
     }
   }
 
-  private def parseJsonStream(subscriber: Subscriber[JsonObject]): JsonParser = {
-    val parser = JsonParser.newParser()
-    val handler = new MyStreamJsonHandler(subscriber)
+  /**
+   * JSON Parser Handler
+   * Manages JSON parsing and streaming.
+   */
+  private def streamingParser(handler: StreamingJsonHandler, parser: JsonParser): JsonParser = {
+    handler.begin()
 
-    parser.handler { event =>
-      handler.handle(event)
-    }
+    parser.handler(event => arrayJsonEventHandler(parser, handler, event))
 
     parser.exceptionHandler { e =>
       handler.handleError(e)
     }
 
     parser.endHandler { _ =>
-      subscriber.onNext(new JsonObject().put("status", "REACT_BOOTSTRAP_API_RESPONSE_COMPLETED"))
-      subscriber.onCompleted()
+      handler.end()
     }
 
     parser
   }
 
+  /**
+   * Handles JSON arrays and objects inside arrays.
+   */
+  private def arrayJsonEventHandler(p: JsonParser, handler: StreamingJsonHandler, event: JsonEvent): Unit = {
+    event.eventType() match {
+      case JsonEventType.START_ARRAY =>
+        p.objectValueMode() // Switch parser to object mode for arrays
+
+      case JsonEventType.VALUE =>
+        handler.handle(event) // Process value event
+
+      case JsonEventType.END_ARRAY =>
+        handler.end() // Signal array end
+
+      case _ => // Handle other cases if needed
+    }
+  }
+
+  /**
+   * Parses JSON as a stream and emits JSON objects.
+   */
+  private def parseJsonStream(subscriber: Subscriber[JsonObject]): JsonParser = {
+    val parser = JsonParser.newParser()
+    val handler = new MyStreamJsonHandler(subscriber)
+    streamingParser(handler, parser) // Attach parser to handler
+  }
+
+  /**
+   * Streams JSON objects using Vert.x JsonParser.
+   */
   def streamRatesFromReact: Observable[JsonObject] = {
     Observable.create { subscriber =>
       client.request().onComplete { reqAr =>
@@ -128,6 +169,9 @@ class ReactBootstrapApiConnector(
     }
   }
 
+  /**
+   * Converts streamed JSON objects into MessageEnvelop[SurfaceMessage].
+   */
   def bootstrapReactApi: Observable[MessageEnvelop[SurfaceMessage]] = {
     streamRatesFromReact
       .map { json =>
