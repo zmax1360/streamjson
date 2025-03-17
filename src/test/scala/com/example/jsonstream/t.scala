@@ -54,29 +54,66 @@ class ReactHandlerTest extends AnyFlatSpec with Matchers with MockitoSugar {
     reactHandler.end()
     verify(mockSubscriber).onCompleted()
   }
-  "ReactHandler" should "count the number of JSON objects in react.json" in {
-    // Step 1: Read the JSON file from resources
-    val jsonFilePath = "react.json"
-    val jsonSource = Source.fromResource(jsonFilePath)
-    val jsonContent = jsonSource.mkString
-    jsonSource.close()
+  "ReactHandler" should "count the number of JSON objects in react.json using streaming" in {
+    // Step 1: Initialize Vert.x and FileSystem
+    val vertx = Vertx.vertx()
+    val fileSystem = vertx.fileSystem()
 
     // Step 2: Create a subscriber to collect JSON objects
     var objectCount = 0
     val subscriber = Subscriber[JsonObject](
-      onNext = _ => objectCount += 1,
-      onError = e => fail(s"Error processing JSON: $e"),
-      onCompleted = () => println("JSON processing completed")
+      onNext = _ => objectCount += 1, // Increment count for each JSON object
+      onError = e => fail(s"Error processing JSON: $e"), // Fail the test on error
+      onCompleted = () => println("JSON processing completed") // Log completion
     )
 
-    // Step 3: Parse the JSON stream
+    // Step 3: Parse the JSON stream using Vert.x's JsonParser
     val parser = HandlerHelper.parseJsonStream(subscriber)
-    parser.write(jsonContent) // Feed the JSON content to the parser
-    parser.end() // Signal the end of the stream
 
-    // Step 4: Verify the count of JSON objects
-    println(s"Total JSON objects processed: $objectCount")
-    objectCount should be > 0 // Ensure at least one object was processed
+    // Step 4: Get the absolute path of the file in the resources folder
+    val resource = getClass.getResource("/react.json") // Path to the file in resources
+    if (resource == null) {
+      fail("File not found in resources: react.json")
+    }
+    val jsonFilePath = new File(resource.toURI).getAbsolutePath // Absolute file path
+
+    // Step 5: Read the file in chunks and feed it to the parser
+    fileSystem.open(jsonFilePath, new OpenOptions().setRead(true), { asyncResult =>
+      if (asyncResult.succeeded()) {
+        val file = asyncResult.result()
+
+        // Use a small buffer size to process data incrementally
+        val bufferSize = 1024 // Adjust based on your requirements
+        val buffer = Buffer.buffer(bufferSize)
+
+        file.handler { chunk: Buffer =>
+          // Append the chunk to the buffer
+          buffer.appendBuffer(chunk)
+
+          // Process the buffer incrementally
+          while (buffer.length() >= bufferSize) {
+            val chunkToProcess = buffer.getBuffer(0, bufferSize)
+            parser.handle(chunkToProcess)
+            buffer.setBuffer(0, buffer.getBuffer(bufferSize, buffer.length()))
+          }
+        }
+
+        file.endHandler { _ =>
+          // Process any remaining data in the buffer
+          if (buffer.length() > 0) {
+            parser.handle(buffer)
+          }
+          parser.end() // Signal the end of the stream
+          file.close() // Close the file
+
+          // Step 6: Verify the count of JSON objects
+          println(s"Total JSON objects processed: $objectCount")
+          objectCount should be > 0 // Ensure at least one object was processed
+        }
+      } else {
+        fail(s"Failed to open file: ${asyncResult.cause()}")
+      }
+    })
   }
   "ReactHandler" should "process JSON objects and large numeric values" in {
     // Case 1: JSON object event
