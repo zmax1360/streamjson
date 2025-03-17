@@ -54,7 +54,43 @@ class ReactHandlerTest extends AnyFlatSpec with Matchers with MockitoSugar {
     reactHandler.end()
     verify(mockSubscriber).onCompleted()
   }
+  "ReactHandler" should "count the number of JSON objects in react.json" in {
+    // Step 1: Read the JSON file from resources
+    val jsonFilePath = "react.json"
+    val jsonSource = Source.fromResource(jsonFilePath)
+    val jsonContent = jsonSource.mkString
+    jsonSource.close()
 
+    // Step 2: Create a subscriber to collect JSON objects
+    var objectCount = 0
+    val subscriber = Subscriber[JsonObject](
+      onNext = _ => objectCount += 1,
+      onError = e => fail(s"Error processing JSON: $e"),
+      onCompleted = () => println("JSON processing completed")
+    )
+
+    // Step 3: Parse the JSON stream
+    val parser = HandlerHelper.parseJsonStream(subscriber)
+    parser.write(jsonContent) // Feed the JSON content to the parser
+    parser.end() // Signal the end of the stream
+
+    // Step 4: Verify the count of JSON objects
+    println(s"Total JSON objects processed: $objectCount")
+    objectCount should be > 0 // Ensure at least one object was processed
+  }
+  "ReactHandler" should "process JSON objects and large numeric values" in {
+    // Case 1: JSON object event
+    when(mockJsonEvent.isObject).thenReturn(true)
+    when(mockJsonEvent.objectValue()).thenReturn(new JsonObject().put("key", "value"))
+    reactHandler.handle(mockJsonEvent)
+    verify(mockSubscriber).onNext(any[JsonObject])
+
+    // Case 2: Large numeric value event
+    when(mockJsonEvent.isNumber).thenReturn(true)
+    when(mockJsonEvent.value()).thenReturn("86164646864734280808080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+    reactHandler.handle(mockJsonEvent)
+    verify(mockSubscriber, times(2)).onNext(any[JsonObject]) // Called twice now
+  }
   // Test 5: arrayJsonEventHandler should handle different JSON event types
   "HandlerHelper" should "handle different JSON event types" in {
     val mockHandler = mock[ReactStreamJsonHandler]
