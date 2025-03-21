@@ -1,23 +1,15 @@
-package com.example.jsonstream
-
-import com.fasterxml.jackson.core.{JsonFactory, JsonParser, JsonToken}
-import com.fasterxml.jackson.databind.ObjectMapper
-import io.vertx.core.buffer.Buffer
-import io.vertx.core.parsetools.{JsonEvent, JsonEventType}
 import com.fasterxml.jackson.core.{JsonFactory, JsonParser, JsonToken}
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.vertx.core.buffer.Buffer
 import io.vertx.core.json.JsonObject
-import rx.lang.scala.Subscriber
 
-import java.math.BigInteger
-
-class CustomJsonParser(subscriber: Subscriber[JsonObject]) {
+class CustomJsonParser {
   private val jsonFactory = new JsonFactory()
   private val mapper = new ObjectMapper()
 
-  def parse(buffer: Buffer): Unit = {
+  def parse(buffer: Buffer): Buffer = {
     val parser = jsonFactory.createParser(buffer.getBytes)
+    val jsonBuffer = Buffer.buffer()
 
     while (parser.nextToken() != null) {
       parser.currentToken() match {
@@ -27,18 +19,20 @@ class CustomJsonParser(subscriber: Subscriber[JsonObject]) {
           try {
             val bigIntValue = new BigInteger(numericValue)
             val jsonObject = new JsonObject().put("value", bigIntValue.toString)
-            subscriber.onNext(jsonObject)
+            jsonBuffer.appendString(jsonObject.encode())
           } catch {
             case e: NumberFormatException =>
-              subscriber.onError(e)
+              throw new RuntimeException(s"Failed to parse large numeric value: $numericValue", e)
           }
         case JsonToken.START_OBJECT =>
           // Handle JSON objects
           val jsonObject = mapper.readValue[JsonObject](parser, classOf[JsonObject])
-          subscriber.onNext(jsonObject)
+          jsonBuffer.appendString(jsonObject.encode())
         case _ =>
         // Ignore other tokens
       }
     }
+
+    jsonBuffer
   }
 }
