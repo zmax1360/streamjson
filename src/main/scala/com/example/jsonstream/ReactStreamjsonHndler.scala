@@ -34,20 +34,31 @@ class ReactHandler(subscriber: Subscriber[JsonObject]) extends ReactStreamJsonHa
     }
   }
   private def handleLargeNumbers(jsonObj: JsonObject): Unit = {
+    import scala.util.Try
+
     jsonObj.fieldNames().forEach { fieldName =>
-      val value = jsonObj.getValue(fieldName)
-      value match {
+      jsonObj.getValue(fieldName) match {
+        // Handle numeric values only
         case n: Number =>
-          // Convert to string if number is too large for Long
-          try {
-            n.longValueExact() // Will throw if doesn't fit in Long
-          } catch {
-            case _: ArithmeticException =>
-              jsonObj.put(fieldName, n.toString)
+          val strValue = n.toString
+          // Check if the number is too large or has decimal places
+          if (isTooLargeForLong(n) || isDecimalNumber(n)) {
+            jsonObj.put(fieldName, strValue) // Store as string
           }
-        case _ => // Do nothing for non-number fields
+        // All other types remain unchanged
+        case _ =>
       }
     }
+  }
+
+  private def isTooLargeForLong(n: Number): Boolean = {
+    Try(n.longValue()).isFailure ||
+      n.toString.replaceFirst("^-", "").length > 18
+  }
+
+  private def isDecimalNumber(n: Number): Boolean = {
+    n.toString.contains(".") ||
+      (n.isInstanceOf[BigDecimal] && n.asInstanceOf[BigDecimal].scale > 0)
   }
 
   override def handleError(e: Throwable): Unit = {
