@@ -1,36 +1,53 @@
 package com.example.jsonstream
 
 import com.fasterxml.jackson.core.{JsonFactory, JsonToken}
+import io.vertx.core.buffer.Buffer
 import io.vertx.core.json.JsonObject
 import rx.lang.scala.Subscriber
-import org.slf4j.LoggerFactory
 
-object JacksonStreamHandler {
-  private val logger = LoggerFactory.getLogger(getClass)
+import java.io._
+import java.util.concurrent.{Executors, LinkedBlockingQueue}
+import scala.concurrent.ExecutionContext
+
+object JacksonStreamingParser {
   private val jsonFactory = new JsonFactory()
+  private val executor = Executors.newSingleThreadExecutor()
+  private implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(executor)
 
-  def parseArrayStream(json: String, subscriber: Subscriber[JsonObject]): Unit = {
-    val parser = jsonFactory.createParser(json)
+  def parseJsonStream(subscriber: Subscriber[JsonObject]): Buffer => Unit = {
+    val queue = new LinkedBlockingQueue[Buffer]()
+    val pipeOut = new PipedOutputStream()
+    val pipeIn = new PipedInputStream(pipeOut, 64 * 1024)
 
-    if (parser.nextToken() != JsonToken.START_ARRAY) {
-      subscriber.onError(new IllegalArgumentException("Expected a JSON array"))
-      return
-    }
+    // Start background parser thread
+    executor.execute(() => {
+      val parser = jsonFactory.createParser(pipeIn)
+      val mapper = io.vertx.core.json.jackson.DatabindCodec.mapper()
 
-    try {
-      while (parser.nextToken() != JsonToken.END_ARRAY) {
-        // Jackson reads full object, supports BigInteger, BigDecimal
-        val node = io.vertx.core.json.jackson.DatabindCodec.mapper().readTree(parser)
-        val jsonObject = new JsonObject(node.toString)
-        subscriber.onNext(jsonObject)
+      try {
+        if (parser.nextToken() != JsonToken.START_ARRAY)
+          throw new IllegalArgumentException("Expected JSON array")
+
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+          val node = mapper.readTree(parser)
+          val jsonObj = new JsonObject(mapper.writeValueAsString(node))
+          subscriber.onNext(jsonObj)
+        }
+
+        subscriber.onCompleted()
+      } catch {
+        case e: Throwable =>
+          subscriber.onError(e)
+      } finally {
+        parser.close()
+        pipeIn.close()
       }
-      subscriber.onCompleted()
-    } catch {
-      case e: Throwable =>
-        logger.error("Error during Jackson stream parsing", e)
-        subscriber.onError(e)
-    } finally {
-      parser.close()
+    })
+
+    // Return function to feed data chunks into the pipe
+    (buffer: Buffer) => {
+      pipeOut.write(buffer.getBytes)
+      pipeOut.flush()
     }
   }
 }

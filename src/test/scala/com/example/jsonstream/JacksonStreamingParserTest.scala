@@ -1,33 +1,40 @@
 package com.example.jsonstream
 
 import com.example.jsonstream.JacksonStreamingParser
+import io.vertx.core.buffer.Buffer
 import io.vertx.core.json.JsonObject
 import org.mockito.MockitoSugar
 import org.scalatest.funspec.AnyFunSpec
 import rx.lang.scala.Subscriber
 
-import java.io.InputStream
+import java.nio.file.{Files, Paths}
+import scala.jdk.CollectionConverters._
 
-class JacksonStreamingParserTest extends AnyFunSpec with MockitoSugar {
+class JacksonStreamingParserBufferTest extends AnyFunSpec with MockitoSugar {
 
-  describe("JacksonStreamingParser") {
+  describe("JacksonStreamingParser.parseJsonStream") {
 
-    it("should stream and process all JSON objects from a resource file") {
-      // Load your existing file from src/test/resources
-      val resourceStream: InputStream =
-        getClass.getClassLoader.getResourceAsStream("your-large-json-file.json")
+    it("should parse a large JSON array file streamed as Vert.x Buffers") {
+      val path = Paths.get(getClass.getClassLoader.getResource("your-large-json-file.json").toURI)
+      val lines = Files.readAllLines(path).asScala
+      val fullJson = lines.mkString("\n")
 
-      assert(resourceStream != null, "Test file not found in resources")
+      // Break JSON into chunks (simulate streaming)
+      val chunks = fullJson.grouped(2048).map(Buffer.buffer).toSeq
 
       val subscriber = mock[Subscriber[JsonObject]]
 
-      // Stream and parse the file
-      JacksonStreamingParser.parseLargeJsonArray(resourceStream, subscriber)
+      val handleChunk = JacksonStreamingParser.parseJsonStream(subscriber)
 
-      // You can change the expected count below based on your file size
+      // Simulate response.handler -> calling chunk by chunk
+      chunks.foreach(handleChunk)
+
+      // Wait a bit for background thread to finish
+      Thread.sleep(1000)
+
+      // Validate basic streaming behavior
       verify(subscriber, atLeastOnce()).onNext(any[JsonObject])
       verify(subscriber).onCompleted()
     }
   }
 }
-
