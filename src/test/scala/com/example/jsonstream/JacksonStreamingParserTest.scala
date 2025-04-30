@@ -7,34 +7,35 @@ import org.mockito.MockitoSugar
 import org.scalatest.funspec.AnyFunSpec
 import rx.lang.scala.Subscriber
 
-import java.nio.file.{Files, Paths}
-import scala.jdk.CollectionConverters._
+import java.io.{File, FileInputStream}
+import java.nio.file.Paths
 
-class JacksonStreamingParserBufferTest extends AnyFunSpec with MockitoSugar {
+class JacksonStreamingParserRealStreamingTest extends AnyFunSpec with MockitoSugar {
 
-  describe("JacksonStreamingParser.parseJsonStream") {
+  describe("JacksonStreamingParser with large file") {
 
-    it("should parse a large JSON array file streamed as Vert.x Buffers") {
-      val path = Paths.get(getClass.getClassLoader.getResource("your-large-json-file.json").toURI)
-      val lines = Files.readAllLines(path).asScala
-      val fullJson = lines.mkString("\n")
-
-      // Break JSON into chunks (simulate streaming)
-      val chunks = fullJson.grouped(2048).map(Buffer.buffer).toSeq
+    it("should stream and parse a 2GB JSON file without heap overflow") {
+      val filePath = Paths.get(getClass.getClassLoader.getResource("your-2gb-file.json").toURI)
+      val inputStream = new FileInputStream(new File(filePath.toUri))
 
       val subscriber = mock[Subscriber[JsonObject]]
-
       val handleChunk = JacksonStreamingParser.parseJsonStream(subscriber)
 
-      // Simulate response.handler -> calling chunk by chunk
-      chunks.foreach(handleChunk)
+      val buffer = new Array  // 8KB chunk size
+      var bytesRead = 0
 
-      // Wait a bit for background thread to finish
-      Thread.sleep(1000)
+      while ({ bytesRead = inputStream.read(buffer); bytesRead != -1 }) {
+        handleChunk(Buffer.buffer(buffer.slice(0, bytesRead)))
+      }
 
-      // Validate basic streaming behavior
+      inputStream.close()
+
+      // Allow background thread to finish
+      Thread.sleep(2000)
+
       verify(subscriber, atLeastOnce()).onNext(any[JsonObject])
       verify(subscriber).onCompleted()
     }
   }
 }
+
