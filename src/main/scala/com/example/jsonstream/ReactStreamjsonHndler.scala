@@ -9,11 +9,8 @@ import java.math.BigInteger
 
 trait ReactStreamJsonHandler {
   def begin(): Unit
-
   def handle(event: JsonEvent): Unit
-
   def handleError(e: Throwable): Unit
-
   def end(): Unit
 }
 
@@ -27,40 +24,11 @@ class ReactHandler(subscriber: Subscriber[JsonObject]) extends ReactStreamJsonHa
 
   override def handle(event: JsonEvent): Unit = {
     if (event.isObject) {
-      val jsonObj = event.objectValue()
-      handleLargeNumbers(jsonObj)
+      currentObject.put("Object",event.value().toString)
       objectCount += 1
-      subscriber.onNext(jsonObj)
+      subscriber.onNext(event.objectValue())
     }
   }
-  private def handleLargeNumbers(jsonObj: JsonObject): Unit = {
-    import scala.util.Try
-
-    jsonObj.fieldNames().forEach { fieldName =>
-      jsonObj.getValue(fieldName) match {
-        // Handle numeric values only
-        case n: Number =>
-          val strValue = n.toString
-          // Check if the number is too large or has decimal places
-          if (isTooLargeForLong(n) || isDecimalNumber(n)) {
-            jsonObj.put(fieldName, strValue) // Store as string
-          }
-        // All other types remain unchanged
-        case _ =>
-      }
-    }
-  }
-
-  private def isTooLargeForLong(n: Number): Boolean = {
-    Try(n.longValue()).isFailure ||
-      n.toString.replaceFirst("^-", "").length > 18
-  }
-
-  private def isDecimalNumber(n: Number): Boolean = {
-    n.toString.contains(".") ||
-      (n.isInstanceOf[BigDecimal] && n.asInstanceOf[BigDecimal].scale > 0)
-  }
-
   override def handleError(e: Throwable): Unit = {
     logger.error("Error occurred during JSON streaming", e)
     subscriber.onError(e)
@@ -74,7 +42,6 @@ class ReactHandler(subscriber: Subscriber[JsonObject]) extends ReactStreamJsonHa
 }
 
 object HandlerHelper {
-  private val logger = LoggerFactory.getLogger(getClass)
   def arrayJsonEventHandler(parser: JsonParser, handler: ReactStreamJsonHandler, event: JsonEvent): Unit = {
     event.`type`() match {
       case JsonEventType.START_ARRAY =>
