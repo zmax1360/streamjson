@@ -54,20 +54,6 @@ class ReactBootstrapApiConnector(
         case JsonEventType.START_OBJECT =>
           currentObject = new JsonObject()
 
-        case JsonEventType.FIELD_NAME =>
-          currentFieldName = event.fieldName()
-
-        case JsonEventType.VALUE_STRING =>
-          if (currentObject != null) currentObject.put(currentFieldName, event.stringValue())
-
-        case JsonEventType.VALUE_NUMBER =>
-          if (currentObject != null) currentObject.put(currentFieldName, event.numberValue())
-
-        case JsonEventType.VALUE_BOOLEAN =>
-          if (currentObject != null) currentObject.put(currentFieldName, event.booleanValue())
-
-        case JsonEventType.VALUE_NULL =>
-          if (currentObject != null) currentObject.putNull(currentFieldName)
 
         case JsonEventType.END_OBJECT =>
           if (insideArray) {
@@ -93,37 +79,31 @@ class ReactBootstrapApiConnector(
    * JSON Parser Handler
    * Manages JSON parsing and streaming.
    */
-  private def streamingParser(handler: StreamingJsonHandler, parser: JsonParser): JsonParser = {
-    handler.begin()
 
-    parser.handler(event => arrayJsonEventHandler(parser, handler, event))
-
-    parser.exceptionHandler { e =>
-      handler.handleError(e)
-    }
-
-    parser.endHandler { _ =>
-      handler.end()
-    }
-
-    parser
-  }
 
   /**
    * Handles JSON arrays and objects inside arrays.
    */
-  private def arrayJsonEventHandler(p: JsonParser, handler: StreamingJsonHandler, event: JsonEvent): Unit = {
-    event.eventType() match {
-      case JsonEventType.START_ARRAY =>
-        p.objectValueMode() // Switch parser to object mode for arrays
+  object HandlerHelper {
+    private val logger = LoggerFactory.getLogger(getClass)
 
-      case JsonEventType.VALUE =>
-        handler.handle(event) // Process value event
+    def arrayJsonEventHandler(parser: JsonParser, handler: ReactStreamJsonHandler, event: JsonEvent): Unit = {
+      event.`type`() match {
+        case JsonEventType.START_ARRAY =>
+          logger.debug("Start of JSON array")
+          parser.objectValueMode() // Switch to object value mode for nested objects
 
-      case JsonEventType.END_ARRAY =>
-        handler.end() // Signal array end
+        case JsonEventType.VALUE =>
+          logger.debug(s"Processing JSON value: ${event.value()}")
+          handler.handle(event) // Delegate to ReactHandler
 
-      case _ => // Handle other cases if needed
+        case JsonEventType.END_ARRAY =>
+          logger.debug("End of JSON array")
+          handler.end() // Signal the end of the array
+
+        case _ =>
+          logger.warn(s"Unhandled JSON event type in array: ${event.`type`()}")
+      }
     }
   }
 
