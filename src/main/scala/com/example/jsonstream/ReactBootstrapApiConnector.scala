@@ -4,23 +4,19 @@ def retryWithExponentialBackoff[T](
                                     retryKey: String
                                   ): Observable[T] = {
   source.retryWhen { errors =>
-    errors.flatMap {
-      case _: TooManyRequestsException =>
-        val (isAllowed, waitMillis) = backoff.isRetryAllowedWithWaitIntervalUntilSeconds(retryKey)
-        if (isAllowed) {
-          println(s"[RETRY] Waiting $waitMillis ms before retrying for $retryKey")
-          Observable.timer(Duration(waitMillis, MILLISECONDS))
-        } else {
-          println(s"[FAILURE] Max retries exceeded for $retryKey")
-          Observable.error(new RuntimeException(s"Max retries exceeded for $retryKey"))
-        }
-
-      case ex =>
-        println(s"[ERROR] Not retryable: ${ex.getMessage}")
-        Observable.error(ex)
+    errors.flatMap { ex =>
+      val retryAllowed = backoff.isRetryAllowedWithWaitIntervalUntilSeconds(retryKey)
+      if (retryAllowed.allowed) {
+        println(s"[Retry] Attempt #${retryAllowed.retriesAttempted}, retrying in ${retryAllowed.waitIntervalMs} ms")
+        Observable.timer(Duration(retryAllowed.waitIntervalMs, MILLISECONDS))
+      } else {
+        println(s"[Give Up] Max retry attempts reached for $retryKey")
+        Observable.error(new RuntimeException(s"Retry exhausted for $retryKey: ${ex.getMessage}", ex))
+      }
     }
   }
 }
+
 case 429 =>
 logger.warn("Received 429 Too Many Requests")
 subscriber.onError(new TooManyRequestsException("Rate limit hit"))
